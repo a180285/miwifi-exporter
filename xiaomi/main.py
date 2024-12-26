@@ -1,13 +1,31 @@
+from sys import stdout
+
 import requests
 import re
 import time
 import random
-from Crypto.Hash import SHA
 import json
+import hashlib
+import traceback
+
 from prometheus_client import Gauge
 import prometheus_client
 from requests.adapters import HTTPAdapter
 import configparser
+
+device_download_bytes = Gauge("device_download_bytes", "device download bytes", ["mac", "devname", "isap"])
+device_upload_bytes = Gauge("device_upload_bytes", "device upload bytes", ["mac", "devname", "isap"])
+device_online_time = Gauge("device_online_time", "device online time", ["mac", "devname", "isap"])
+
+wan_download_bytes = Gauge("wan_download_bytes", "wan download bytes", ["devname"])
+wan_upload_bytes = Gauge("wan_upload_bytes", "wan upload bytes", ["devname"])
+
+
+device_count = Gauge("device_count", "device count", ["type"])
+
+router_mem_usage = Gauge("router_mem_usage", "router mem usage", ["total", "hz", "type"])
+router_hardware_version = Gauge("router_hardware_version", "router hardware version", ["version", "displayName"])
+router_up_time = Gauge("router_up_time", "router up time")
 
 # 读取配置
 config = configparser.ConfigParser()
@@ -38,13 +56,10 @@ def get_token():
     nonce = "0_" + mac_addr + "_" + str(int(time.time())) + "_" + str(random.randint(1000, 10000))
 
     # 第一次加密 对应CryptoJS.SHA1(pwd + this.key)
-    password_encrypt1 = SHA.new()
-    password_encrypt1.update((password + key).encode('utf-8'))
+    password_encrypt1 = hashlib.sha256((password + key).encode('utf-8')).hexdigest()
 
     # 第二次加密对应 CryptoJS.SHA1(this.nonce + CryptoJS.SHA1(pwd + this.key).toString()).toString();
-    password_encrypt2 = SHA.new()
-    password_encrypt2.update((nonce + password_encrypt1.hexdigest()).encode('utf-8'))
-    hexpwd = password_encrypt2.hexdigest()
+    hexpwd = hashlib.sha256((nonce + password_encrypt1).encode('utf-8')).hexdigest()
 
     data = {
         "logtype": 2,
@@ -59,71 +74,48 @@ def get_token():
     res = json.loads(response.content)
     if res['code'] == 0:
         token = res['token']
+        print(f'login token: {token}')
         return token
     else:
-        return False
+        print(f"login failed! {res}")
+        raise Exception("login failed!")
 
 
-def get_route_status(token):
+def update_route_status(token):
     url = route_url + '/cgi-bin/luci/;stok=' + token + '/api/misystem/status'
-    req = s.get(url, timeout=timeout)
+    req = s.get(url, timeout=(timeout, timeout))
     route_status = json.loads(req.content)
-    mem_usage = route_status["mem"]["usage"]
-    uptime = round(float(route_status["upTime"]) / 60.0 / 60.0 / 24.0, 2)
-    cpu_load = route_status["cpu"]["load"]
-    wan_downspeed = round(float(route_status["wan"]["downspeed"]) / 1024.0 / 1024.0, 2)
-    wan_maxdownloadspeed = round(float(route_status["wan"]["maxdownloadspeed"]) / 1024.0 / 1024.0, 2)
-    wan_upload = round(float(route_status["wan"]["upload"]) / 1024.0 / 1024.0, 2)
-    wan_upspeed = round(float(route_status["wan"]["upspeed"]) / 1024.0 / 1024.0, 2)
-    wan_maxuploadspeed = round(float(route_status["wan"]["maxuploadspeed"]) / 1024.0 / 1024.0, 2)
-    wan_download = round(float(route_status["wan"]["download"]) / 1024.0 / 1024.0, 2)
-    count = route_status["count"]["online"]
-    status = {
-        "mem_usage": mem_usage,
-        "uptime": uptime,
-        "cpu_load": cpu_load,
-        "wan_download": wan_download,
-        "wan_downspeed": wan_downspeed,
-        "wan_maxdownloadspeed": wan_maxdownloadspeed,
-        "wan_upload": wan_upload,
-        "wan_upspeed": wan_upspeed,
-        "wan_maxuploadspeed": wan_maxuploadspeed,
-        "count": count
-    }
-    return status
 
+    for device in route_status["dev"]:
+        isap = "1"
+        if 'isap' in device:
+            isap = device["isap"]
+        device_download_bytes.labels(device["mac"], device["devname"], isap).set(device["download"])
+        device_upload_bytes.labels(device["mac"], device["devname"], isap).set(device["upload"])
+        device_online_time.labels(device["mac"], device["devname"], isap).set(device["online"])
+
+    wan_download_bytes.labels(route_status["wan"]["download"]).set(route_status["wan"]["download"])
+    wan_upload_bytes.labels(route_status["wan"]["upload"]).set(route_status["wan"]["upload"])
+    
+    for device_type in route_status["count"]:
+        device_count.labels(device_type).set(route_status["count"][device_type])
+
+    router_mem_usage.labels(route_status["mem"]["total"], route_status["mem"]["hz"], route_status["mem"]["type"]).set(route_status["mem"]["usage"])
+    router_hardware_version.labels(route_status["hardware"]["version"], route_status["hardware"]["displayName"]).set(1)
+    router_up_time.set(route_status["upTime"])
 
 if __name__ == '__main__':
     prometheus_client.start_http_server(exporter_port)
-    miwifi_prom = Gauge("MIWIFI", "miwifi status", ["miwifi_status"])
     print("server start at " + str(exporter_port))
     print("blog: www.bboy.app")
 
     while True:
         try:
             token = get_token()
-            status = get_route_status(token)
-            mem_usage = status["mem_usage"]
-            uptime = status["uptime"]
-            cpu_load = status["cpu_load"]
-            wan_downspeed = status["wan_downspeed"]
-            wan_maxdownloadspeed = status["wan_maxdownloadspeed"]
-            wan_upload = status["wan_upload"]
-            wan_upspeed = status["wan_upspeed"]
-            wan_maxuploadspeed = status["wan_maxuploadspeed"]
-            wan_download = status["wan_download"]
-            count = status["count"]
-
-            miwifi_prom.labels("mem_usage").set(mem_usage)
-            miwifi_prom.labels("uptime").set(uptime)
-            miwifi_prom.labels("cpu_load").set(cpu_load)
-            miwifi_prom.labels("wan_downspeed").set(wan_downspeed)
-            miwifi_prom.labels("wan_maxdownloadspeed").set(wan_maxdownloadspeed)
-            miwifi_prom.labels("wan_upload").set(wan_upload)
-            miwifi_prom.labels("wan_upspeed").set(wan_upspeed)
-            miwifi_prom.labels("wan_maxuploadspeed").set(wan_maxuploadspeed)
-            miwifi_prom.labels("wan_download").set(wan_download)
-            miwifi_prom.labels("count").set(count)
+            update_route_status(token)
+            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} update route status success")
         except Exception as e:
-            print(e)
+            print(f"update route status failed! {e}")
+            print(traceback.format_exc())
+        stdout.flush()
         time.sleep(sleep_time)

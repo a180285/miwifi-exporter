@@ -94,8 +94,8 @@ def update_route_status(token):
         device_upload_bytes.labels(device["mac"], device["devname"], isap).set(device["upload"])
         device_online_time.labels(device["mac"], device["devname"], isap).set(device["online"])
 
-    wan_download_bytes.labels(route_status["wan"]["download"]).set(route_status["wan"]["download"])
-    wan_upload_bytes.labels(route_status["wan"]["upload"]).set(route_status["wan"]["upload"])
+    wan_download_bytes.labels(route_status["wan"]["devname"]).set(route_status["wan"]["download"])
+    wan_upload_bytes.labels(route_status["wan"]["devname"]).set(route_status["wan"]["upload"])
     
     for device_type in route_status["count"]:
         device_count.labels(device_type).set(route_status["count"][device_type])

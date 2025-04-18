@@ -7,6 +7,8 @@ import random
 import json
 import hashlib
 import traceback
+import threading
+import subprocess
 
 from prometheus_client import Gauge
 import prometheus_client
@@ -104,7 +106,82 @@ def update_route_status(token):
     router_hardware_version.labels(route_status["hardware"]["version"], route_status["hardware"]["displayName"]).set(1)
     router_up_time.set(route_status["upTime"])
 
+def is_router_online():
+    # ping router to check if it is online
+    try:
+        subprocess.check_output(['ping', '-c', '3', '-W', '2', route_ip], stderr=subprocess.STDOUT)
+        return True
+    except Exception as e:
+        return False
+
+def is_internet_online():
+    EXTERNAL_TARGETS = ["www.tencent.com", "www.aliyun.com", "www.baidu.com"]
+    for target in EXTERNAL_TARGETS:
+        try:
+            subprocess.check_output(['ping', '-c', '3', '-W', '2', target], stderr=subprocess.STDOUT)
+            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {target} is online")
+            return True
+        except Exception as e:
+            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {target} is offline")
+            continue
+    return False
+
+def restart_router():
+    print("try to restart router")
+    token = get_token()
+    url = route_url + '/cgi-bin/luci/;stok=' + token + '/api/xqsystem/reboot?client=web'
+    s.get(url, timeout=timeout)
+    print("router restart successfully.")
+
+def check_network():
+    router_online_wait_time = 4 * 60 # 4 minutes
+    next_check_time = time.time()
+    router_offline_count = 0
+    internet_ping_failed_count = 0
+    while True:
+        stdout.flush()
+        time.sleep(sleep_time)
+
+        while time.time() < next_check_time:
+            time.sleep(1)
+        try:
+            if not is_router_online():
+                print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} router is offline")
+                router_offline_count += 1
+                if router_offline_count > 3:
+                    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} router is offline for 3 times")
+                    internet_ping_failed_count = 0
+                    router_offline_count = 0
+                    next_check_time = time.time() + router_online_wait_time
+                continue
+            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} router is online")
+            if is_internet_online():
+                print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} internet is online")
+                internet_ping_failed_count = 0
+                router_offline_count = 0
+                continue
+            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} internet is offline")
+            # offline
+            internet_ping_failed_count += 1
+            if internet_ping_failed_count > 3:
+                print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} internet is offline for 3 times")
+                restart_router()
+                internet_ping_failed_count = 0
+                router_offline_count = 0
+                print("restart router, wait 4 minutes")
+                next_check_time = time.time() + router_online_wait_time
+            
+        except Exception as e:
+            print(f"update route status failed! {e}")
+            print(traceback.format_exc())
+
+
+    
+
 if __name__ == '__main__':
+    thread = threading.Thread(target=check_network)
+    thread.start()
+    
     prometheus_client.start_http_server(exporter_port)
     print("server start at " + str(exporter_port))
     print("blog: www.bboy.app")
@@ -119,3 +196,5 @@ if __name__ == '__main__':
             print(traceback.format_exc())
         stdout.flush()
         time.sleep(sleep_time)
+
+# source .venv/bin/activate
